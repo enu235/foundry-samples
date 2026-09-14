@@ -381,6 +381,48 @@ When public network access is disabled (the default), you need a secure connecti
 
 For detailed setup instructions, see: [Securely connect to Azure AI Foundry](https://learn.microsoft.com/en-us/azure/ai-foundry/how-to/configure-private-link?view=foundry#securely-connect-to-foundry).
 
+## Private MCP Evidence Checklist
+
+When troubleshooting or validating that an MCP server is correctly deployed behind a private VNet and accessible only through Foundry's network-injected path, verify the following:
+
+### 1. Foundry Configuration
+- **Standard Agent service network injection** is configured with `networkInjections` in the Foundry account
+- **Delegated agent subnet** exists and is delegated to `Microsoft.App/environments`
+- **Customer-managed/BYO VNet** is used (or the template-created VNet with proper address space)
+
+### 2. MCP Hosting
+- **Container Apps environment** is created with `--internal-only true` (no public internet access)
+- **VNet subnet** is configured via `--infrastructure-subnet-resource-id`
+- **Virtual IP is internal** (the environment's static IP is in the mcp-subnet address range)
+- **Private DNS zone** for the Container Apps domain is linked to the VNet
+- **App ingress reports external=true** but is NOT internet-facing — the MCP server FQDN has no public DNS resolution, and the environment VIP remains in the VNet
+
+### 3. Runtime Verification
+
+**Direct MCP access** (requires VPN, ExpressRoute, or Bastion):
+
+From within the VNet, verify the MCP server responds to protocol calls:
+
+- **Private DNS resolution** — `nslookup <mcp-server-fqdn>` resolves to the environment's internal static IP (not a public IP)
+- **MCP protocol handshake**:
+  - `initialize` request succeeds and returns `mcp-session-id` header
+  - `tools/list` request succeeds and returns available tools
+  - `tools/call` request succeeds and executes a tool
+
+Direct access from a public host will fail (no public DNS, no route to the internal VIP).
+
+**Foundry agent integration via Data Proxy** (works from public host when Foundry `publicNetworkAccess: Enabled`):
+
+Using the Azure AI Projects SDK:
+
+- **Agent creation** with MCP tool configuration succeeds
+- **Agent response** includes `mcp_list_tools` items (tools enumerated via Data Proxy)
+- **Agent response** includes `mcp_call` items (tool invoked successfully via Data Proxy)
+
+The Data Proxy routes through the network-injected agent subnet to reach the private MCP server. SDK tests do not require VPN when the Foundry resource has public network access enabled.
+
+This checklist confirms that the MCP server is accessible only through the Foundry Data Proxy via the private VNet path, not from the public internet.
+
 ## MCP Server Deployment
 
 To deploy MCP servers on the private VNet after the base infrastructure is deployed:
@@ -405,6 +447,8 @@ az containerapp create \
   --min-replicas 1
 ```
 
+> **Note on `--ingress external`**: The `external` ingress setting means the app is accessible to other apps within the Container Apps environment, not that it's internet-reachable. When the environment is created with `--internal-only true` and public network access is disabled, the MCP server remains private to the VNet. It does not have a public internet endpoint.
+
 Then configure a private DNS zone for Container Apps. See the [Bicep 19 TESTING-GUIDE.md](../../infrastructure-setup-bicep/19-private-network-agent-tools/tests/TESTING-GUIDE.md) for details on DNS configuration for tools behind VNet.
 
 ---
@@ -419,9 +463,9 @@ If you need to manually clean up:
 1. Delete the **project capability host** first
 2. Delete the **account capability host**
 3. Delete and [**purge**](https://learn.microsoft.com/en-us/azure/ai-services/recover-purge-resources?tabs=azure-portal#purge-a-deleted-resource) the Foundry account
-4. Allow approximately **20 minutes** for all resources to be fully unlinked
+4. Allow approximately **20–30 minutes** for the account capability host deletion to complete (the resource may remain in **Deleting** state during this time)
 
-> **Important**: Simply deleting the account is not sufficient — you must also purge it so that the associated capability host deletion is triggered. The service will automatically handle the removal of the capability host and any linked resources in the background.
+> **Important**: Simply deleting the account is not sufficient — you must also purge it so that the associated capability host deletion is triggered. The service will automatically handle the removal of the capability host and any linked resources in the background. Wait for the account capability host deletion to complete before attempting to reuse the delegated agent subnet with a new account.
 
 ---
 

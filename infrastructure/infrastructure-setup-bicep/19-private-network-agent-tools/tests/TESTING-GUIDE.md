@@ -51,6 +51,50 @@ Once connected to the VNet, all SDK commands and portal interactions in this gui
 
 ---
 
+## Private MCP Evidence Checklist
+
+When troubleshooting or validating that an MCP server is correctly deployed behind a private VNet and accessible only through Foundry's network-injected path, verify the following:
+
+### 1. Foundry Configuration
+- **Standard Agent service network injection** is configured with `networkInjections` in the Foundry account
+- **Delegated agent subnet** exists and is delegated to `Microsoft.App/environments`
+- **Customer-managed/BYO VNet** is used (or the template-created VNet with proper address space)
+
+### 2. MCP Hosting
+- **Container Apps environment** is created with `--internal-only true` (no public internet access)
+- **VNet subnet** is configured via `--infrastructure-subnet-resource-id`
+- **Virtual IP is internal** (the environment's static IP is in the mcp-subnet address range)
+- **Private DNS zone** for the Container Apps domain is linked to the VNet
+- **App ingress reports external=true** but is NOT internet-facing — the MCP server FQDN has no public DNS resolution, and the environment VIP remains in the VNet
+
+### 3. Runtime Verification
+
+**Direct MCP access** (requires VPN, ExpressRoute, or Bastion):
+
+From within the VNet, verify the MCP server responds to protocol calls:
+
+- **Private DNS resolution** — `nslookup <mcp-server-fqdn>` resolves to the environment's internal static IP (not a public IP)
+- **MCP protocol handshake**:
+  - `initialize` request succeeds and returns `mcp-session-id` header
+  - `tools/list` request succeeds and returns available tools
+  - `tools/call` request succeeds and executes a tool
+
+Direct access from a public host will fail (no public DNS, no route to the internal VIP).
+
+**Foundry agent integration via Data Proxy** (works from public host when Foundry `publicNetworkAccess: Enabled`):
+
+Using the Azure AI Projects SDK:
+
+- **Agent creation** with MCP tool configuration succeeds
+- **Agent response** includes `mcp_list_tools` items (tools enumerated via Data Proxy)
+- **Agent response** includes `mcp_call` items (tool invoked successfully via Data Proxy)
+
+The Data Proxy routes through the network-injected agent subnet to reach the private MCP server. SDK tests do not require VPN when the Foundry resource has public network access enabled.
+
+This checklist confirms that the MCP server is accessible only through the Foundry Data Proxy via the private VNet path, not from the public internet.
+
+---
+
 ## Switching the Foundry Resource to Public Access
 
 If your security policy permits, you can enable public network access on the Foundry resource so that SDK tests and portal access work directly from the internet without VPN/ExpressRoute/Bastion.
@@ -235,6 +279,8 @@ az containerapp create \
 MCP_FQDN=$(az containerapp show -g $RESOURCE_GROUP -n "mcp-http-server" --query "properties.configuration.ingress.fqdn" -o tsv)
 echo "MCP Server URL: https://${MCP_FQDN}/noauth/mcp"
 ```
+
+> **Note on `--ingress external`**: The `external` ingress setting means the app is accessible to other apps within the Container Apps environment, not that it's internet-reachable. When the environment is created with `--internal-only true` and public network access is disabled, the MCP server remains private to the VNet. It does not have a public internet endpoint.
 
 ### 4.4 Configure Private DNS
 
@@ -1034,3 +1080,5 @@ This is expected when network injection is configured. Use SDK testing instead -
 # Delete all resources
 az group delete --name $RESOURCE_GROUP --yes --no-wait
 ```
+
+> **Note**: Account capability host deletion can take 20–30 minutes. If reusing the agent subnet for a new deployment, wait for the capability host to finish deleting (not just the resource group) before creating a new account on the same subnet.
